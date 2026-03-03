@@ -24,20 +24,22 @@
         hr { border: 0; height: 1px; background: #555; margin: 15px 0; }
         strong { color: #444; }
         #initialChoice button { margin-bottom: 5px; }
+        .disclaimer { font-size: 0.85em; color: #d9534f; margin-bottom: 10px; text-align: center; font-weight: bold; }
     </style>
 </head>
 <body>
-     <div id="blocker"> <div id="blockerInstructions"> <h2>E-Money Block Game Alpha v2.3</h2> <p>Click anywhere to start playing!</p> <p>(Requires Pointer Lock)</p <hr> <h3>Controls:</h3> <p>W/A/S/D: Move | Space: Jump (Hold for continuous)</p> <p>Mouse: Look | Left Click: Destroy Block | Right Click: Place Block</p> <p>ESC: Release Mouse</p> <hr> <p>Use the UI (Top Left) to connect...</p> </div> </div>
+     <div id="blocker"> <div id="blockerInstructions"> <h2>E-Money Block Game Alpha v2.3</h2> <p>Click anywhere to start playing!</p> <p>(Requires Pointer Lock)</p> <hr> <h3>Controls:</h3> <p>W/A/S/D: Move | Space: Jump (Hold for continuous)</p> <p>Mouse: Look | Left Click: Destroy Block | Right Click: Place Block</p> <p>ESC: Release Mouse</p> <hr> <p>Use the UI (Top Left) to connect...</p> </div> </div>
      <div id="ui"> 
-        <div><strong>Status:</strong> <span id="status">Initializing...</span></div> 
+        <div><strong>Status:</strong> <span id="status">Connecting to server...</span></div> 
         <div id="players">Players: 1</div> 
         <label for="playerNameInput" style="font-weight: bold; font-size: 0.9em; margin-top: 10px; display: block;">Your Name:</label>
         <input type="text" id="playerNameInput" maxlength="16" style="width: 100%; min-height: 30px; margin-top: 5px; box-sizing: border-box; background: #f8f8f8; color: #333; border: 1px solid #ccc; font-size: 1.1em; padding: 5px; text-align: center;">
         <div id="connectionInfo"> 
             <hr>
+            <div class="disclaimer">Note: Server takes ~1 minute to start if inactive.</div>
             <div id="initialChoice">
-                <button id="showHostBtn">Host New Game</button>
-                <button id="showJoinBtn">Join Game</button>
+                <button id="showHostBtn" disabled>Host New Game</button>
+                <button id="showJoinBtn" disabled>Join Game</button>
             </div>
             <div id="hostView" style="display: none;">
                 <label>Your Game ID:</label>
@@ -56,7 +58,7 @@
      <div id="crosshair"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
     <script>
         const PLAYER_HEIGHT = 1.5; const PLAYER_WIDTH = 0.6; const PLAYER_SPEED = 5.0; const MOUSE_SENSITIVITY = 0.002;
@@ -66,12 +68,23 @@
         let scene, camera, renderer; let world = {}; let playerVelocity = new THREE.Vector3();
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
         let isJumpHeld = false; let isOnGround = false;
-        let peer; let peers = {}; let connections = {}; let peerId; let isHost = false; let playerStates = {};
+        
+        let socket; let gameRoom = null; let peers = {}; let peerId; let isHost = false; let playerStates = {};
+        
         let clock = new THREE.Clock(); let raycaster = new THREE.Raycaster();
         let blockGeometry; let blockMaterials = {}; let textures = {}; let highlightMaterial, highlightMesh;
         let pointerLocked = false;
-        let lastUpdateTime = 0;
         let playerName = 'Player' + Math.floor(Math.random() * 1000);
+
+        // Networking State
+        const NETWORK_TICK_RATE = 50; // 20 updates per second
+        let lastSentPosition = new THREE.Vector3();
+        let lastSentRotation = new THREE.Vector3();
+        let timeSinceLastSend = Date.now();
+        let lastIntervalTime = Date.now();
+        let networkTickInterval = null;
+        let peerCleanupInterval = null;
+        let lastHostUpdate = Date.now();
 
         const blocker = document.getElementById('blocker'); const statusEl = document.getElementById('status');
         const hostIdDisplay = document.getElementById('hostIdDisplay'); const joinIdInput = document.getElementById('joinIdInput');
@@ -86,8 +99,18 @@
         const joinBtn = document.getElementById('joinBtn');
         const backBtns = document.querySelectorAll('.backBtn');
 
+        function init() { 
+            setupScene(); setupPlayer(); setupLighting(); setupBlockGeometry(); setupTexturesAndMaterials(); 
+            setupWorld(); setupBlockHighlight(); setupControls(); setupEventListeners(); setupNetworkUI(); initNetwork(); 
+            playerNameInput.value = playerName; 
+            playerNameInput.addEventListener('input', e => { 
+                playerName = e.target.value.trim() || 'Player'; 
+                if (playerName.length > 16) playerName = playerName.substring(0, 16); 
+                e.target.value = playerName; 
+            }); 
+            animate(); 
+        }
 
-        function init() { setupScene(); setupPlayer(); setupLighting(); setupBlockGeometry(); setupTexturesAndMaterials(); setupWorld(); setupBlockHighlight(); setupControls(); setupEventListeners(); setupPeerJSUI(); playerNameInput.value = playerName; playerNameInput.addEventListener('input', e => { playerName = e.target.value.trim() || 'Player'; if (playerName.length > 16) playerName = playerName.substring(0, 16); e.target.value = playerName; }); statusEl.textContent = 'Ready'; animate(); }
         function setupScene() {  scene = new THREE.Scene(); scene.background = new THREE.Color(0x87CEEB); scene.fog = new THREE.Fog(0x87CEEB, 10, 150); camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000); renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(window.innerWidth, window.innerHeight); renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap; document.body.appendChild(renderer.domElement); }
         function setupPlayer() {  camera.position.set(0, WORLD_HEIGHT + PLAYER_HEIGHT + 2, 5); camera.rotation.order = 'YXZ'; }
         function setupBlockGeometry() {  blockGeometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE); }
@@ -109,74 +132,223 @@
 
         function generateShortId(length = 6) { const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let result = ''; for (let i = 0; i < length; i++) { result += chars.charAt(Math.floor(Math.random() * chars.length)); } return result; }
 
-        function setupPeerJSUI() {
+        // Math Helper: Shortest path interpolation for angles (prevents full 360 spin glitch)
+        function lerpAngle(start, end, t) {
+            let delta = end - start;
+            while (delta < -Math.PI) delta += Math.PI * 2;
+            while (delta > Math.PI) delta -= Math.PI * 2;
+            return start + delta * t;
+        }
+
+        function initNetwork() {
+            socket = io('https://quicklash-server.onrender.com');
+            
+            socket.on('connect', () => {
+                const isReconnection = (peerId !== undefined);
+                peerId = socket.id;
+                
+                if (isReconnection && gameRoom) {
+                    if (isHost) {
+                        statusEl.textContent = 'Reconnected as Host.';
+                        socket.emit('create_room', gameRoom); // Reclaim the room
+                    } else {
+                        statusEl.textContent = 'Reconnected! Joining...';
+                        socket.emit('join_room', { roomCode: gameRoom, name: playerName });
+                        const initData = { 
+                            type: 'init', 
+                            id: peerId, 
+                            name: playerName, 
+                            position: { x: camera.position.x, y: camera.position.y, z: camera.position.z }, 
+                            rotation: { _x: camera.rotation.x, _y: camera.rotation.y, _z: camera.rotation.z } 
+                        };
+                        socket.emit('client_send', { roomCode: gameRoom, data: initData });
+                    }
+                } else {
+                    statusEl.textContent = 'Ready';
+                    showHostBtn.disabled = false;
+                    showJoinBtn.disabled = false;
+                }
+            });
+
+            socket.on('player_joined', ({ id, name }) => {
+                if (isHost) statusEl.textContent = `Player ${name} connected.`;
+            });
+
+            socket.on('player_data', ({ id, data }) => {
+                if (isHost) handleData(data, id);
+            });
+
+            socket.on('game_data', (data) => {
+                if (!isHost) {
+                    lastHostUpdate = Date.now();
+                    handleData(data, 'HOST');
+                }
+            });
+
+            socket.on('error_msg', (msg) => {
+                statusEl.textContent = `Error: ${msg}`;
+                resetConnection();
+            });
+
+            socket.on('disconnect', (reason) => {
+                // If it was manually closed, reset fully
+                if (reason === 'io server disconnect' || reason === 'io client disconnect') {
+                    statusEl.textContent = 'Disconnected from server.';
+                    resetConnection();
+                } else {
+                    // Let Socket.IO try to automatically reconnect
+                    if (gameRoom) {
+                        statusEl.textContent = 'Connection lost. Auto-reconnecting...';
+                    } else {
+                        statusEl.textContent = 'Disconnected. Reconnecting...';
+                    }
+                }
+            });
+
+            setupNetworkLoops();
+        }
+
+        function setupNetworkLoops() {
+            // 1. Network Emit Loop (Bandwidth Optimization & Heartbeats)
+            if(networkTickInterval) clearInterval(networkTickInterval);
+            networkTickInterval = setInterval(() => {
+                if (!socket || !gameRoom) return; 
+                
+                const now = Date.now();
+                const dist = camera.position.distanceTo(lastSentPosition);
+                const rotDist = Math.abs(camera.rotation.x - lastSentRotation.x) + Math.abs(camera.rotation.y - lastSentRotation.y);
+                
+                // Force an update every 2 seconds to prevent being kicked for idling/tabbing out
+                const forceHeartbeat = (now - timeSinceLastSend > 2000);
+                
+                if (dist > 0.005 || rotDist > 0.005 || forceHeartbeat) {
+                    const myUpdate = { 
+                        type: 'update', 
+                        id: peerId, 
+                        position: { x: camera.position.x, y: camera.position.y, z: camera.position.z }, 
+                        rotation: { _x: camera.rotation.x, _y: camera.rotation.y, _z: camera.rotation.z } 
+                    };
+                    
+                    broadcastMessage(myUpdate);
+                    
+                    if (isHost) {
+                        playerStates[peerId] = { name: playerName, position: myUpdate.position, rotation: myUpdate.rotation };
+                    }
+                    
+                    lastSentPosition.copy(camera.position);
+                    lastSentRotation.set(camera.rotation.x, camera.rotation.y, camera.rotation.z);
+                    timeSinceLastSend = now;
+                }
+            }, NETWORK_TICK_RATE);
+
+            // 2. Peer Cleanup & Host Monitor Loop (Robust Disconnects with Tab Wake-up Detection)
+            if(peerCleanupInterval) clearInterval(peerCleanupInterval);
+            lastIntervalTime = Date.now();
+            
+            peerCleanupInterval = setInterval(() => {
+                if (!socket || !gameRoom) {
+                    lastIntervalTime = Date.now();
+                    return;
+                }
+                
+                const now = Date.now();
+                const dt = now - lastIntervalTime;
+                lastIntervalTime = now;
+                
+                // Wake-up detection: if dt is large, the browser throttled this tab because it was inactive.
+                // Reset timers instead of instantly kicking/disconnecting everyone.
+                if (dt > 2500) {
+                    lastHostUpdate = now;
+                    if (isHost) {
+                        for (const pId in peers) peers[pId].lastUpdate = now;
+                    }
+                    return;
+                }
+                
+                // Host checking for stale clients
+                if (isHost) {
+                    for (const pId in peers) {
+                        if (now - peers[pId].lastUpdate > 15000) { // Timeout increased to 15s
+                            handleDisconnect(pId);
+                        }
+                    }
+                } 
+                // Client checking if host died
+                else {
+                    if (now - lastHostUpdate > 30000) { // Timeout increased to 30s
+                        statusEl.textContent = "Host connection lost.";
+                        resetConnection();
+                    }
+                }
+            }, 1000);
+        }
+
+        function setupNetworkUI() {
             showHostBtn.onclick = () => { initialChoiceView.style.display = 'none'; hostView.style.display = 'block'; hostGame(); };
             showJoinBtn.onclick = () => { initialChoiceView.style.display = 'none'; joinView.style.display = 'block'; };
             joinBtn.onclick = joinGame;
-            backBtns.forEach(btn => { btn.onclick = resetConnection; });
+            backBtns.forEach(btn => { 
+                btn.onclick = () => { 
+                    resetConnection(); 
+                    if (socket && socket.connected) statusEl.textContent = 'Ready';
+                }; 
+            });
         }
 
         function hostGame() {
+            if (!socket || !socket.connected) { statusEl.textContent = 'Not connected to server!'; return; }
             isHost = true;
             statusEl.textContent = 'Generating Game ID...';
             hostIdDisplay.textContent = 'Generating...';
-            const generatedId = generateShortId(6);
-            peer = new Peer(generatedId);
-            peer.on('open', id => { peerId = id; hostIdDisplay.textContent = id; statusEl.textContent = 'Waiting for players...'; playerStates[peerId] = { name: playerName, position: camera.position, rotation: camera.rotation }; });
-            peer.on('connection', setupConnectionEvents);
-            peer.on('error', err => { if (err.type === 'unavailable-id') { statusEl.textContent = `Error: Game ID taken. Try again.`; } else { statusEl.textContent = `Error: ${err.type}`; } resetConnection(); });
+            gameRoom = generateShortId(6);
+            socket.emit('create_room', gameRoom);
+            hostIdDisplay.textContent = gameRoom;
+            statusEl.textContent = 'Waiting for players...';
+            playerStates[peerId] = { name: playerName, position: camera.position, rotation: camera.rotation };
         }
         
         function joinGame() {
+            if (!socket || !socket.connected) { statusEl.textContent = 'Not connected to server!'; return; }
             const hostId = joinIdInput.value.trim().toUpperCase();
             if (!hostId) { alert('Please enter a Host ID.'); return; }
             isHost = false;
+            gameRoom = hostId;
             joinBtn.disabled = true;
             joinView.querySelector('.backBtn').disabled = true;
             statusEl.textContent = 'Connecting...';
-            peer = new Peer();
-            peer.on('open', id => { peerId = id; const conn = peer.connect(hostId, { reliable: true }); setupConnectionEvents(conn); });
-            peer.on('error', err => { statusEl.textContent = `Error: ${err.type}`; resetConnection(); });
-        }
-
-        function setupConnectionEvents(conn) {
-            connections[conn.peer] = conn;
-            conn.on('open', () => {
-                playerNameInput.disabled = true;
-                if (isHost) {
-                    statusEl.textContent = `Player ${conn.peer} connected.`;
-                } else {
-                    statusEl.textContent = 'Connected! Handshaking...';
-                    connectionInfoEl.style.display = 'none';
-                    const initData = { type: 'init', id: peerId, name: playerName, position: camera.position, rotation: camera.rotation };
-                    conn.send(JSON.stringify(initData));
-                }
-            });
-            conn.on('data', data => { try { handleData(JSON.parse(data), conn.peer); } catch (e) {} });
-            conn.on('close', () => { handleDisconnect(conn.peer); });
-            conn.on('error', (err) => { statusEl.textContent = `Connection error.`; handleDisconnect(conn.peer); });
+            
+            lastHostUpdate = Date.now(); // Reset host timer
+            socket.emit('join_room', { roomCode: gameRoom, name: playerName });
+            
+            const initData = { 
+                type: 'init', 
+                id: peerId, 
+                name: playerName, 
+                position: { x: camera.position.x, y: camera.position.y, z: camera.position.z }, 
+                rotation: { _x: camera.rotation.x, _y: camera.rotation.y, _z: camera.rotation.z } 
+            };
+            socket.emit('client_send', { roomCode: gameRoom, data: initData });
+            
+            connectionInfoEl.style.display = 'none';
+            playerNameInput.disabled = true;
         }
 
         function handleDisconnect(disconnectedId) {
-            statusEl.textContent = `Player ${disconnectedId} disconnected.`;
+            statusEl.textContent = `Player disconnected.`;
             removePeerRepresentation(disconnectedId);
-            delete connections[disconnectedId];
             if (isHost) {
                 delete playerStates[disconnectedId];
                 broadcastMessage({ type: 'disconnect', id: disconnectedId });
-            } else if (Object.keys(connections).length === 0) {
+            } else {
                 resetConnection();
-                statusEl.textContent = 'Disconnected from host.';
             }
             updatePlayerCount();
         }
 
         function resetConnection() {
-            if (peer) peer.destroy();
             for (const pId in peers) removePeerRepresentation(pId);
             isHost = false;
-            peer = null;
-            connections = {};
+            gameRoom = null;
             playerStates = {};
             
             hostView.style.display = 'none';
@@ -192,67 +364,149 @@
 
             hostIdDisplay.textContent = 'Generating...';
             joinIdInput.value = '';
-            statusEl.textContent = 'Ready';
+            
+            if (socket && socket.connected) {
+                statusEl.textContent = 'Ready';
+            } else {
+                statusEl.textContent = 'Connecting to server...';
+            }
             updatePlayerCount();
         }
 
-        function broadcastMessage(data, originatorId = null) { if (!peer) return; const message = JSON.stringify(data); if (isHost) { for (const pId in connections) { if (pId !== originatorId && connections[pId].open) { connections[pId].send(message); } } } else { const hostConn = Object.values(connections)[0]; if (hostConn && hostConn.open) { hostConn.send(message); } } }
-        function sendWorldState(conn) { if (!conn || !conn.open) return; const worldData = []; for (const key in world) { if (world[key]) { const [x, y, z] = key.split(',').map(Number); worldData.push({ p: { x, y, z }, t: world[key].type }); } } conn.send(JSON.stringify({ type: 'worldState', blocks: worldData })); }
+        function broadcastMessage(data) { 
+            if (!socket || !gameRoom) return; 
+            if (isHost) { 
+                socket.emit('host_broadcast', { roomCode: gameRoom, data: data }); 
+            } else { 
+                socket.emit('client_send', { roomCode: gameRoom, data: data }); 
+            } 
+        }
+
+        function sendWorldState(targetId) { 
+            if (!socket || !gameRoom) return;
+            const worldData = []; 
+            for (const key in world) { 
+                if (world[key]) { 
+                    const [x, y, z] = key.split(',').map(Number); 
+                    worldData.push({ p: { x, y, z }, t: world[key].type }); 
+                } 
+            } 
+            socket.emit('host_private', { targetId: targetId, data: { type: 'worldState', blocks: worldData } }); 
+        }
 
         function createNameTag(text) { const fontface = "Arial"; const fontsize = 24; const padding = 10; const cornerRadius = 8; const canvas = document.createElement('canvas'); const context = canvas.getContext('2d'); context.font = `Bold ${fontsize}px ${fontface}`; const metrics = context.measureText(text); const textWidth = metrics.width; canvas.width = textWidth + padding * 2; canvas.height = fontsize + padding * 2; context.font = `Bold ${fontsize}px ${fontface}`; context.fillStyle = "rgba(0, 0, 0, 0.5)"; context.beginPath(); context.moveTo(cornerRadius, 0); context.lineTo(canvas.width - cornerRadius, 0); context.quadraticCurveTo(canvas.width, 0, canvas.width, cornerRadius); context.lineTo(canvas.width, canvas.height - cornerRadius); context.quadraticCurveTo(canvas.width, canvas.height, canvas.width - cornerRadius, canvas.height); context.lineTo(cornerRadius, canvas.height); context.quadraticCurveTo(0, canvas.height, 0, canvas.height - cornerRadius); context.lineTo(0, cornerRadius); context.quadraticCurveTo(0, 0, cornerRadius, 0); context.closePath(); context.fill(); context.fillStyle = "rgba(255, 255, 255, 1.0)"; context.textAlign = 'center'; context.textBaseline = 'middle'; context.fillText(text, canvas.width / 2, canvas.height / 2); const texture = new THREE.CanvasTexture(canvas); texture.needsUpdate = true; const spriteMaterial = new THREE.SpriteMaterial({ map: texture }); const sprite = new THREE.Sprite(spriteMaterial); const aspect = canvas.width / canvas.height; sprite.scale.set(aspect * 0.3, 0.3, 1.0); return sprite; }
+        
         function createPlayerModel(name = "Player") { const playerGroup = new THREE.Group(); const headSize = PLAYER_WIDTH * 0.8; const torsoHeight = PLAYER_HEIGHT * 0.5; const torsoWidth = PLAYER_WIDTH; const torsoDepth = PLAYER_WIDTH * 0.6; const limbWidth = PLAYER_WIDTH * 0.3; const armHeight = torsoHeight * 0.9; const legHeight = PLAYER_HEIGHT - torsoHeight - headSize; const eyeSize = headSize * 0.18; const headMaterial = new THREE.MeshLambertMaterial({ color: 0xFFCC99 }); const torsoMaterial = new THREE.MeshLambertMaterial({ color: 0x0088FF }); const limbMaterial = new THREE.MeshLambertMaterial({ color: 0x333399 }); const eyeMaterial = new THREE.MeshLambertMaterial({ color: 0x000000 }); const headGeo = new THREE.BoxGeometry(headSize, headSize, headSize); const torsoGeo = new THREE.BoxGeometry(torsoWidth, torsoHeight, torsoDepth); const armGeo = new THREE.BoxGeometry(limbWidth, armHeight, limbWidth); const legGeo = new THREE.BoxGeometry(limbWidth, legHeight, limbWidth); const eyeGeo = new THREE.BoxGeometry(eyeSize, eyeSize, eyeSize); const head = new THREE.Mesh(headGeo, headMaterial); const torso = new THREE.Mesh(torsoGeo, torsoMaterial); const leftArm = new THREE.Mesh(armGeo, limbMaterial); const rightArm = new THREE.Mesh(armGeo, limbMaterial); const leftLeg = new THREE.Mesh(legGeo, limbMaterial); const rightLeg = new THREE.Mesh(legGeo, limbMaterial); const leftEye = new THREE.Mesh(eyeGeo, eyeMaterial); const rightEye = new THREE.Mesh(eyeGeo, eyeMaterial); leftLeg.position.set(-torsoWidth / 2 + limbWidth / 2, legHeight / 2, 0); rightLeg.position.set(torsoWidth / 2 - limbWidth / 2, legHeight / 2, 0); torso.position.set(0, legHeight + torsoHeight / 2, 0); head.position.set(0, legHeight + torsoHeight + headSize / 2, 0); leftArm.position.set(-torsoWidth / 2 - limbWidth / 2, legHeight + torsoHeight - armHeight / 2, 0); rightArm.position.set(torsoWidth / 2 + limbWidth / 2, legHeight + torsoHeight - armHeight / 2, 0); const eyeOffsetZ = -headSize / 2 + eyeSize / 3; const eyeOffsetX = headSize * 0.25; const eyeOffsetY = headSize * 0.1; leftEye.position.set(-eyeOffsetX, eyeOffsetY, eyeOffsetZ); rightEye.position.set(eyeOffsetX, eyeOffsetY, eyeOffsetZ); head.add(leftEye); head.add(rightEye); head.name = 'playerHead'; playerGroup.add(head); playerGroup.add(torso); playerGroup.add(leftArm); playerGroup.add(rightArm); playerGroup.add(leftLeg); playerGroup.add(rightLeg); const nameTag = createNameTag(name); const headTopY = legHeight + torsoHeight + headSize; nameTag.position.set(0, headTopY + 0.3, 0); playerGroup.add(nameTag); playerGroup.traverse((child) => { if (child instanceof THREE.Mesh) { child.castShadow = true; child.receiveShadow = true; } }); playerGroup.rotation.order = 'YXZ'; return playerGroup; }
-        function addPeerRepresentation(id, name, position, rotation) { if (peers[id] || id === peerId) return; const playerModel = createPlayerModel(name); playerModel.position.set(position.x, position.y - PLAYER_HEIGHT, position.z); if(rotation) { playerModel.rotation.y = rotation._y; const head = playerModel.getObjectByName('playerHead'); if (head) { head.rotation.x = rotation._x; } } peers[id] = { object: playerModel, name: name, lastUpdate: Date.now() }; scene.add(playerModel); updatePlayerCount(); }
+        
+        function addPeerRepresentation(id, name, position, rotation) { 
+            if (peers[id] || id === peerId) return; 
+            const playerModel = createPlayerModel(name); 
+            
+            // Set initial transforms
+            if (position) {
+                playerModel.position.set(position.x, position.y - PLAYER_HEIGHT, position.z); 
+            }
+            if (rotation) { 
+                playerModel.rotation.y = rotation._y; 
+                const head = playerModel.getObjectByName('playerHead'); 
+                if (head) head.rotation.x = rotation._x; 
+            } 
+            
+            // Register networking states for smooth interpolation
+            peers[id] = { 
+                object: playerModel, 
+                name: name, 
+                targetPosition: position ? new THREE.Vector3(position.x, position.y - PLAYER_HEIGHT, position.z) : new THREE.Vector3(),
+                targetRotation: rotation ? { x: rotation._x, y: rotation._y } : { x: 0, y: 0 },
+                lastUpdate: Date.now() 
+            }; 
+            
+            scene.add(playerModel); 
+            updatePlayerCount(); 
+        }
         
         function handleData(message, senderId) {
+            if (!message) return; // Prevent crashing on malformed empty packets
+
             if (isHost) {
                 switch(message.type) {
                     case 'init':
-                        playerStates[senderId] = { name: message.name, position: message.position, rotation: message.rotation };
-                        addPeerRepresentation(senderId, message.name, message.position, message.rotation); 
-                        connections[senderId].send(JSON.stringify({ type: 'syncPlayers', players: playerStates }));
-                        broadcastMessage({ type: 'newPlayer', id: senderId, name: message.name, position: message.position, rotation: message.rotation }, senderId);
-                        sendWorldState(connections[senderId]);
-                        updatePlayerCount();
+                        if (message.position && message.rotation) {
+                            playerStates[senderId] = { name: message.name, position: message.position, rotation: message.rotation };
+                            addPeerRepresentation(senderId, message.name, message.position, message.rotation); 
+                            socket.emit('host_private', { targetId: senderId, data: { type: 'syncPlayers', players: playerStates } });
+                            broadcastMessage({ type: 'newPlayer', id: senderId, name: message.name, position: message.position, rotation: message.rotation });
+                            sendWorldState(senderId);
+                            updatePlayerCount();
+                        }
                         break;
                     case 'update':
-                        if (playerStates[senderId]) {
+                        if (playerStates[senderId] && message.position && message.rotation) {
                             playerStates[senderId].position = message.position;
                             playerStates[senderId].rotation = message.rotation;
-                            updatePeerRepresentation(senderId, message.position, message.rotation);
-                            broadcastMessage(message, senderId);
+                            updatePeerTargets(senderId, message.position, message.rotation);
+                            broadcastMessage(message); // Forward update to other clients
+                        } else if (!playerStates[senderId]) {
+                            // If host receives an update from a guest it previously kicked/lost track of, 
+                            // command them to seamlessly re-initialize their connection.
+                            socket.emit('host_private', { targetId: senderId, data: { type: 'force_reinit' } });
                         }
                         break;
                     case 'addBlock':
                     case 'removeBlock':
-                        broadcastMessage(message, senderId);
-                        if(message.type === 'addBlock') addBlock(message.position.x, message.position.y, message.position.z, message.blockType, false);
-                        else removeBlock(message.position.x, message.position.y, message.position.z, false);
+                        if (message.position) {
+                            broadcastMessage(message);
+                            if(message.type === 'addBlock') addBlock(message.position.x, message.position.y, message.position.z, message.blockType, false);
+                            else removeBlock(message.position.x, message.position.y, message.position.z, false);
+                        }
                         break;
                 }
                 return;
             }
 
+            // --- Client Side Handling ---
             if (message.id === peerId && message.type !== 'syncPlayers') return;
 
             switch (message.type) {
+                case 'force_reinit':
+                    // We were ghosted/asleep and the host lost track of us. Rejoin seamlessly.
+                    const initData = { 
+                        type: 'init', 
+                        id: peerId, 
+                        name: playerName, 
+                        position: { x: camera.position.x, y: camera.position.y, z: camera.position.z }, 
+                        rotation: { _x: camera.rotation.x, _y: camera.rotation.y, _z: camera.rotation.z } 
+                    };
+                    socket.emit('client_send', { roomCode: gameRoom, data: initData });
+                    break;
                 case 'syncPlayers': 
-                    Object.entries(message.players).forEach(([pId, state]) => addPeerRepresentation(pId, state.name, state.position, state.rotation));
-                    statusEl.textContent = 'Game Joined!';
+                    if (message.players) {
+                        Object.entries(message.players).forEach(([pId, state]) => addPeerRepresentation(pId, state.name, state.position, state.rotation));
+                        statusEl.textContent = 'Game Joined!';
+                    }
                     break;
                 case 'newPlayer':
-                    addPeerRepresentation(message.id, message.name, message.position, message.rotation);
+                    if (message.position && message.rotation) {
+                        addPeerRepresentation(message.id, message.name, message.position, message.rotation);
+                    }
                     break;
                 case 'worldState': 
-                    message.blocks.forEach(blockData => addBlock(blockData.p.x, blockData.p.y, blockData.p.z, blockData.t, false)); 
+                    if (message.blocks && Array.isArray(message.blocks)) {
+                        message.blocks.forEach(b => {
+                            if (b && b.p) addBlock(b.p.x, b.p.y, b.p.z, b.t, false);
+                        }); 
+                    }
                     break;
                 case 'update': 
-                    updatePeerRepresentation(message.id, message.position, message.rotation); 
+                    if (message.position && message.rotation) {
+                        updatePeerTargets(message.id, message.position, message.rotation); 
+                    }
                     break;
                 case 'addBlock': 
-                    addBlock(message.position.x, message.position.y, message.position.z, message.blockType, false); 
+                    if (message.position) addBlock(message.position.x, message.position.y, message.position.z, message.blockType, false); 
                     break;
                 case 'removeBlock': 
-                    removeBlock(message.position.x, message.position.y, message.position.z, false); 
+                    if (message.position) removeBlock(message.position.x, message.position.y, message.position.z, false); 
                     break;
                 case 'disconnect': 
                     removePeerRepresentation(message.id); 
@@ -260,30 +514,75 @@
             }
         }
 
-        function updatePeerRepresentation(id, position, rotation) { if (!peers[id]) { addPeerRepresentation(id, "Player...", position, rotation); } else if (peers[id].object) { const playerModel = peers[id].object; const targetPos = new THREE.Vector3( position.x, position.y - PLAYER_HEIGHT, position.z ); playerModel.position.lerp(targetPos, 0.3); if(rotation) { playerModel.rotation.y = rotation._y; const head = playerModel.getObjectByName('playerHead'); if (head) { head.rotation.x = rotation._x; } } peers[id].lastUpdate = Date.now(); } }
-        function removePeerRepresentation(id) { if (peers[id] && peers[id].object) { scene.remove(peers[id].object); } delete peers[id]; updatePlayerCount(); }
-        function updatePlayerCount() { const count = Object.keys(playerStates).length > 0 ? Object.keys(playerStates).length : 1 + Object.keys(peers).length; playersEl.textContent = `Players: ${count}`; }
-
-        function animate() { requestAnimationFrame(animate); const delta = Math.min(clock.getDelta(), 0.1); if (pointerLocked) { updatePlayerMovement(delta); updateBlockHighlight(); } updatePeers(delta); try { if (renderer && scene && camera) renderer.render(scene, camera); } catch (e) {} }
-        function updatePlayerMovement(delta) { const moveSpeed = PLAYER_SPEED; playerVelocity.y -= GRAVITY_ACCELERATION * delta; if (isJumpHeld && isOnGround) { playerVelocity.y = JUMP_VELOCITY; isOnGround = false; } const forward = new THREE.Vector3(); camera.getWorldDirection(forward); forward.y = 0; forward.normalize(); const right = new THREE.Vector3(); right.crossVectors(forward, camera.up).normalize(); let intendedVelocityX = 0; let intendedVelocityZ = 0; if (moveForward) { intendedVelocityX += forward.x; intendedVelocityZ += forward.z; } if (moveBackward) { intendedVelocityX -= forward.x; intendedVelocityZ -= forward.z; } if (moveLeft) { intendedVelocityX -= right.x; intendedVelocityZ -= right.z; } if (moveRight) { intendedVelocityX += right.x; intendedVelocityZ += right.z; } const horizontalMagnitude = Math.sqrt(intendedVelocityX * intendedVelocityX + intendedVelocityZ * intendedVelocityZ); if (horizontalMagnitude > 0) { playerVelocity.x = (intendedVelocityX / horizontalMagnitude) * moveSpeed; playerVelocity.z = (intendedVelocityZ / horizontalMagnitude) * moveSpeed; } else { playerVelocity.x = 0; playerVelocity.z = 0; } const playerHalfWidth = PLAYER_WIDTH / 2; const playerHalfDepth = PLAYER_WIDTH / 2; const feetLevelOffset = -PLAYER_HEIGHT; const eyeLevelOffset = 0.01; const deltaMovement = playerVelocity.clone().multiplyScalar(delta); isOnGround = false; const currentYPos = camera.position.y; const nextYPos = currentYPos + deltaMovement.y; const playerBoxY = new THREE.Box3(); playerBoxY.min.set(camera.position.x - playerHalfWidth, nextYPos + feetLevelOffset, camera.position.z - playerHalfDepth); playerBoxY.max.set(camera.position.x + playerHalfWidth, nextYPos + eyeLevelOffset, camera.position.z + playerHalfDepth); if (checkCollision(playerBoxY)) { if (playerVelocity.y <= 0) { let highestGroundY = -Infinity; for (let y = Math.floor(playerBoxY.min.y); y <= Math.floor(playerBoxY.max.y); y++) { for (let x = Math.floor(playerBoxY.min.x); x <= Math.floor(playerBoxY.max.x); x++) { for (let z = Math.floor(playerBoxY.min.z); z <= Math.floor(playerBoxY.max.z); z++) { if (getBlockAt(x, y, z)) { highestGroundY = Math.max(highestGroundY, y + 1); } } } } if (highestGroundY > -Infinity) { camera.position.y = highestGroundY + PLAYER_HEIGHT; playerVelocity.y = 0; isOnGround = true; } else { camera.position.y = currentYPos; playerVelocity.y = 0; } } else if (playerVelocity.y > 0) { let lowestCeilingY = Infinity; for (let y = Math.floor(playerBoxY.min.y); y <= Math.floor(playerBoxY.max.y); y++) { for (let x = Math.floor(playerBoxY.min.x); x <= Math.floor(playerBoxY.max.x); x++) { for (let z = Math.floor(playerBoxY.min.z); z <= Math.floor(playerBoxY.max.z); z++) { if (getBlockAt(x, y, z)) { lowestCeilingY = Math.min(lowestCeilingY, y); } } } } if (lowestCeilingY < Infinity) { camera.position.y = lowestCeilingY - eyeLevelOffset; playerVelocity.y = 0; } else { camera.position.y = currentYPos; playerVelocity.y = 0; } } } else { camera.position.y = nextYPos; } const currentXPos = camera.position.x; const nextXPos = currentXPos + deltaMovement.x; const playerBoxX = new THREE.Box3(); playerBoxX.min.set(nextXPos - playerHalfWidth, camera.position.y + feetLevelOffset, camera.position.z - playerHalfDepth); playerBoxX.max.set(nextXPos + playerHalfWidth, camera.position.y + eyeLevelOffset, camera.position.z + playerHalfDepth); if (checkCollision(playerBoxX)) { playerVelocity.x = 0; if (deltaMovement.x > 0) camera.position.x = Math.floor(nextXPos + playerHalfWidth) - playerHalfWidth - 0.01; else if (deltaMovement.x < 0) camera.position.x = Math.floor(nextXPos - playerHalfWidth) + 1 + playerHalfWidth + 0.01; } else { camera.position.x = nextXPos; } const currentZPos = camera.position.z; const nextZPos = currentZPos + deltaMovement.z; const playerBoxZ = new THREE.Box3(); playerBoxZ.min.set(camera.position.x - playerHalfWidth, camera.position.y + feetLevelOffset, nextZPos - playerHalfDepth); playerBoxZ.max.set(camera.position.x + playerHalfWidth, camera.position.y + eyeLevelOffset, nextZPos + playerHalfDepth); if (checkCollision(playerBoxZ)) { playerVelocity.z = 0; if (deltaMovement.z > 0) camera.position.z = Math.floor(nextZPos + playerHalfDepth) - playerHalfDepth - 0.01; else if (deltaMovement.z < 0) camera.position.z = Math.floor(nextZPos - playerHalfDepth) + 1 + playerHalfDepth + 0.01; } else { camera.position.z = nextZPos; } if (camera.position.y < -10) { camera.position.set(0, WORLD_HEIGHT + PLAYER_HEIGHT + 2, 0); playerVelocity.set(0,0,0); isOnGround = false; } }
-        function updateBlockHighlight() {  const intersect = getIntersectingBlock(); if (intersect) { const highlightPos = intersect.object.position.clone(); highlightMesh.position.copy(highlightPos); highlightMesh.visible = true; } else { highlightMesh.visible = false; } }
-        const updateInterval = 100;
-        function updatePeers(delta) {
-            const now = Date.now();
-            if (peer && (Object.keys(connections).length > 0) && (now - lastUpdateTime > updateInterval)) {
-                const myUpdate = { type: 'update', id: peerId, position: camera.position, rotation: { _x: camera.rotation.x, _y: camera.rotation.y, _z: camera.rotation.z } };
-                broadcastMessage(myUpdate);
-                if (isHost) {
-                    playerStates[peerId] = { name: playerName, position: camera.position, rotation: camera.rotation };
+        function updatePeerTargets(id, position, rotation) { 
+            if (!peers[id]) { 
+                addPeerRepresentation(id, "Player...", position, rotation); 
+            } else { 
+                if (position) {
+                    peers[id].targetPosition.set(position.x, position.y - PLAYER_HEIGHT, position.z); 
                 }
-                lastUpdateTime = now;
+                if (rotation) { 
+                    peers[id].targetRotation.x = rotation._x;
+                    peers[id].targetRotation.y = rotation._y;
+                } 
+                peers[id].lastUpdate = Date.now(); 
+            } 
+        }
+
+        function removePeerRepresentation(id) { 
+            if (peers[id] && peers[id].object) { 
+                scene.remove(peers[id].object); 
+            } 
+            delete peers[id]; 
+            updatePlayerCount(); 
+        }
+
+        function updatePlayerCount() { 
+            const count = Object.keys(playerStates).length > 0 ? Object.keys(playerStates).length : 1 + Object.keys(peers).length; 
+            playersEl.textContent = `Players: ${count}`; 
+        }
+
+        function animate() { 
+            requestAnimationFrame(animate); 
+            const delta = Math.min(clock.getDelta(), 0.1); 
+            
+            if (pointerLocked) { 
+                updatePlayerMovement(delta); 
+                updateBlockHighlight(); 
+            } 
+            
+            // Smoothly interpolate peers towards target network state
+            interpolatePeers(delta);
+            
+            try { 
+                if (renderer && scene && camera) renderer.render(scene, camera); 
+            } catch (e) {} 
+        }
+
+        function interpolatePeers(delta) {
+            const interpolationSpeed = 10.0;
+            for (const id in peers) {
+                const peer = peers[id];
+                if (peer && peer.object) {
+                    // Smooth position lerp
+                    peer.object.position.lerp(peer.targetPosition, interpolationSpeed * delta);
+                    
+                    // Smooth short-path angle rotation
+                    peer.object.rotation.y = lerpAngle(peer.object.rotation.y, peer.targetRotation.y, interpolationSpeed * delta);
+                    
+                    const head = peer.object.getObjectByName('playerHead');
+                    if (head) {
+                        head.rotation.x = lerpAngle(head.rotation.x, peer.targetRotation.x, interpolationSpeed * delta);
+                    }
+                }
             }
         }
 
+        function updatePlayerMovement(delta) { const moveSpeed = PLAYER_SPEED; playerVelocity.y -= GRAVITY_ACCELERATION * delta; if (isJumpHeld && isOnGround) { playerVelocity.y = JUMP_VELOCITY; isOnGround = false; } const forward = new THREE.Vector3(); camera.getWorldDirection(forward); forward.y = 0; forward.normalize(); const right = new THREE.Vector3(); right.crossVectors(forward, camera.up).normalize(); let intendedVelocityX = 0; let intendedVelocityZ = 0; if (moveForward) { intendedVelocityX += forward.x; intendedVelocityZ += forward.z; } if (moveBackward) { intendedVelocityX -= forward.x; intendedVelocityZ -= forward.z; } if (moveLeft) { intendedVelocityX -= right.x; intendedVelocityZ -= right.z; } if (moveRight) { intendedVelocityX += right.x; intendedVelocityZ += right.z; } const horizontalMagnitude = Math.sqrt(intendedVelocityX * intendedVelocityX + intendedVelocityZ * intendedVelocityZ); if (horizontalMagnitude > 0) { playerVelocity.x = (intendedVelocityX / horizontalMagnitude) * moveSpeed; playerVelocity.z = (intendedVelocityZ / horizontalMagnitude) * moveSpeed; } else { playerVelocity.x = 0; playerVelocity.z = 0; } const playerHalfWidth = PLAYER_WIDTH / 2; const playerHalfDepth = PLAYER_WIDTH / 2; const feetLevelOffset = -PLAYER_HEIGHT; const eyeLevelOffset = 0.01; const deltaMovement = playerVelocity.clone().multiplyScalar(delta); isOnGround = false; const currentYPos = camera.position.y; const nextYPos = currentYPos + deltaMovement.y; const playerBoxY = new THREE.Box3(); playerBoxY.min.set(camera.position.x - playerHalfWidth, nextYPos + feetLevelOffset, camera.position.z - playerHalfDepth); playerBoxY.max.set(camera.position.x + playerHalfWidth, nextYPos + eyeLevelOffset, camera.position.z + playerHalfDepth); if (checkCollision(playerBoxY)) { if (playerVelocity.y <= 0) { let highestGroundY = -Infinity; for (let y = Math.floor(playerBoxY.min.y); y <= Math.floor(playerBoxY.max.y); y++) { for (let x = Math.floor(playerBoxY.min.x); x <= Math.floor(playerBoxY.max.x); x++) { for (let z = Math.floor(playerBoxY.min.z); z <= Math.floor(playerBoxY.max.z); z++) { if (getBlockAt(x, y, z)) { highestGroundY = Math.max(highestGroundY, y + 1); } } } } if (highestGroundY > -Infinity) { camera.position.y = highestGroundY + PLAYER_HEIGHT; playerVelocity.y = 0; isOnGround = true; } else { camera.position.y = currentYPos; playerVelocity.y = 0; } } else if (playerVelocity.y > 0) { let lowestCeilingY = Infinity; for (let y = Math.floor(playerBoxY.min.y); y <= Math.floor(playerBoxY.max.y); y++) { for (let x = Math.floor(playerBoxY.min.x); x <= Math.floor(playerBoxY.max.x); x++) { for (let z = Math.floor(playerBoxY.min.z); z <= Math.floor(playerBoxY.max.z); z++) { if (getBlockAt(x, y, z)) { lowestCeilingY = Math.min(lowestCeilingY, y); } } } } if (lowestCeilingY < Infinity) { camera.position.y = lowestCeilingY - eyeLevelOffset; playerVelocity.y = 0; } else { camera.position.y = currentYPos; playerVelocity.y = 0; } } } else { camera.position.y = nextYPos; } const currentXPos = camera.position.x; const nextXPos = currentXPos + deltaMovement.x; const playerBoxX = new THREE.Box3(); playerBoxX.min.set(nextXPos - playerHalfWidth, camera.position.y + feetLevelOffset, camera.position.z - playerHalfDepth); playerBoxX.max.set(nextXPos + playerHalfWidth, camera.position.y + eyeLevelOffset, camera.position.z + playerHalfDepth); if (checkCollision(playerBoxX)) { playerVelocity.x = 0; if (deltaMovement.x > 0) camera.position.x = Math.floor(nextXPos + playerHalfWidth) - playerHalfWidth - 0.01; else if (deltaMovement.x < 0) camera.position.x = Math.floor(nextXPos - playerHalfWidth) + 1 + playerHalfWidth + 0.01; } else { camera.position.x = nextXPos; } const currentZPos = camera.position.z; const nextZPos = currentZPos + deltaMovement.z; const playerBoxZ = new THREE.Box3(); playerBoxZ.min.set(camera.position.x - playerHalfWidth, camera.position.y + feetLevelOffset, nextZPos - playerHalfDepth); playerBoxZ.max.set(camera.position.x + playerHalfWidth, camera.position.y + eyeLevelOffset, nextZPos + playerHalfDepth); if (checkCollision(playerBoxZ)) { playerVelocity.z = 0; if (deltaMovement.z > 0) camera.position.z = Math.floor(nextZPos + playerHalfDepth) - playerHalfDepth - 0.01; else if (deltaMovement.z < 0) camera.position.z = Math.floor(nextZPos - playerHalfDepth) + 1 + playerHalfDepth + 0.01; } else { camera.position.z = nextZPos; } if (camera.position.y < -10) { camera.position.set(0, WORLD_HEIGHT + PLAYER_HEIGHT + 2, 0); playerVelocity.set(0,0,0); isOnGround = false; } }
+        function updateBlockHighlight() {  const intersect = getIntersectingBlock(); if (intersect) { const highlightPos = intersect.object.position.clone(); highlightMesh.position.copy(highlightPos); highlightMesh.visible = true; } else { highlightMesh.visible = false; } }
+        
         document.addEventListener('DOMContentLoaded', (event) => { try { init(); } catch (error) { document.getElementById('status').textContent = "Initialization Error! Check Console."; if (blocker) blocker.style.display = 'flex'; if (document.getElementById('blockerInstructions')) document.getElementById('blockerInstructions').innerHTML = `<h2>Error!</h2><p>Game failed to initialize...</p><p>${error.message}</p>`; } });
 
     </script>
 </body>
-
 </html>
-
