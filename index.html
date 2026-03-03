@@ -25,10 +25,16 @@
         strong { color: #444; }
         #initialChoice button { margin-bottom: 5px; }
         .disclaimer { font-size: 0.85em; color: #d9534f; margin-bottom: 10px; text-align: center; font-weight: bold; }
+        
+        /* New Inventory UI Styles */
+        #hotbar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 8px; z-index: 25; box-shadow: 0 4px 8px rgba(0,0,0,0.4); }
+        .slot { width: 48px; height: 48px; border: 3px solid #555; border-radius: 4px; cursor: pointer; display: flex; align-items: flex-end; justify-content: flex-end; padding: 2px; box-sizing: border-box; color: white; font-weight: bold; font-size: 14px; text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; background-size: cover; background-color: #333; transition: transform 0.1s, border-color 0.1s; image-rendering: pixelated; }
+        .slot:hover { border-color: #aaa; transform: scale(1.05); }
+        .slot.active { border-color: #fff; transform: scale(1.1); box-shadow: 0 0 10px rgba(255,255,255,0.5); z-index: 2; }
     </style>
 </head>
 <body>
-     <div id="blocker"> <div id="blockerInstructions"> <h2>E-Money Block Game Alpha v2.3</h2> <p>Click anywhere to start playing!</p> <p>(Requires Pointer Lock)</p> <hr> <h3>Controls:</h3> <p>W/A/S/D: Move | Space: Jump (Hold for continuous)</p> <p>Mouse: Look | Left Click: Destroy Block | Right Click: Place Block</p> <p>ESC: Release Mouse</p> <hr> <p>Use the UI (Top Left) to connect...</p> </div> </div>
+     <div id="blocker"> <div id="blockerInstructions"> <h2>E-Money Block Game Alpha v2.3</h2> <p>Click anywhere to start playing!</p> <p>(Requires Pointer Lock)</p> <hr> <h3>Controls:</h3> <p>W/A/S/D: Move | Space: Jump (Hold for continuous)</p> <p>Mouse: Look | Left Click: Destroy Block | Right Click: Place Block</p> <p>1-4: Select Block | ESC: Release Mouse</p> <hr> <p>Use the UI (Top Left) to connect...</p> </div> </div>
      <div id="ui"> 
         <div><strong>Status:</strong> <span id="status">Connecting to server...</span></div> 
         <div id="players">Players: 1</div> 
@@ -54,8 +60,15 @@
             </div>
         </div> 
     </div>
-     <div id="instructions"> W/A/S/D: Move | Space: Jump (Hold) | Mouse: Look | LClick: Destroy | RClick: Place | ESC: Unlock Mouse </div>
+     <div id="instructions"> W/A/S/D: Move | Space: Jump (Hold) | Mouse: Look | LClick: Destroy | RClick: Place | 1-4: Select Block | ESC: Unlock Mouse </div>
      <div id="crosshair"></div>
+     
+     <div id="hotbar">
+         <div class="slot active" id="slot-0" title="Grass">1</div>
+         <div class="slot" id="slot-1" title="Stone">2</div>
+         <div class="slot" id="slot-2" title="Wood">3</div>
+         <div class="slot" id="slot-3" title="Cobblestone">4</div>
+     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
@@ -75,6 +88,10 @@
         let blockGeometry; let blockMaterials = {}; let textures = {}; let highlightMaterial, highlightMesh;
         let pointerLocked = false;
         let playerName = 'Player' + Math.floor(Math.random() * 1000);
+
+        // Block & Inventory State
+        const availableBlocks = ['grass', 'stone', 'wood', 'cobblestone'];
+        let currentBlockIndex = 0;
 
         // Networking State
         const NETWORK_TICK_RATE = 50; // 20 updates per second
@@ -101,7 +118,7 @@
 
         function init() { 
             setupScene(); setupPlayer(); setupLighting(); setupBlockGeometry(); setupTexturesAndMaterials(); 
-            setupWorld(); setupBlockHighlight(); setupControls(); setupEventListeners(); setupNetworkUI(); initNetwork(); 
+            setupWorld(); setupBlockHighlight(); setupControls(); setupEventListeners(); setupHotbar(); setupNetworkUI(); initNetwork(); 
             playerNameInput.value = playerName; 
             playerNameInput.addEventListener('input', e => { 
                 playerName = e.target.value.trim() || 'Player'; 
@@ -114,7 +131,125 @@
         function setupScene() {  scene = new THREE.Scene(); scene.background = new THREE.Color(0x87CEEB); scene.fog = new THREE.Fog(0x87CEEB, 10, 150); camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000); renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(window.innerWidth, window.innerHeight); renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap; document.body.appendChild(renderer.domElement); }
         function setupPlayer() {  camera.position.set(0, WORLD_HEIGHT + PLAYER_HEIGHT + 2, 5); camera.rotation.order = 'YXZ'; }
         function setupBlockGeometry() {  blockGeometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE); }
-        function setupTexturesAndMaterials() {  blockGeometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE); const textureSize = 16; function createCanvasTexture(drawFunction) { const canvas = document.createElement('canvas'); canvas.width = textureSize; canvas.height = textureSize; const context = canvas.getContext('2d'); drawFunction(context, textureSize); const texture = new THREE.CanvasTexture(canvas); texture.magFilter = THREE.NearestFilter; texture.minFilter = THREE.NearestFilter; texture.needsUpdate = true; return texture; } function drawDirt(ctx, size) { ctx.fillStyle = '#8B4513'; ctx.fillRect(0, 0, size, size); ctx.fillStyle = 'rgba(0,0,0,0.1)'; for (let i=0; i < size*size*0.3; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); } function drawStone(ctx, size) { ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, size, size); ctx.fillStyle = 'rgba(0,0,0,0.15)'; for (let i=0; i < size*size*0.4; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); ctx.fillStyle = 'rgba(255,255,255,0.1)'; for (let i=0; i < size*size*0.2; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); } function drawGrassTop(ctx, size) { ctx.fillStyle = '#5a9a5a'; ctx.fillRect(0, 0, size, size); ctx.fillStyle = 'rgba(0,0,0,0.1)'; for (let i=0; i < size*size*0.3; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); ctx.fillStyle = 'rgba(255,255,255,0.05)'; for (let i=0; i < size*size*0.2; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); } function drawGrassSide(ctx, size) { ctx.fillStyle = '#5a9a5a'; ctx.fillRect(0, 0, size, size * 0.25); ctx.fillStyle = '#8B4513'; ctx.fillRect(0, size * 0.25, size, size * 0.75); ctx.fillStyle = 'rgba(0,0,0,0.1)'; for (let i=0; i < size*size*0.75*0.3; ++i) ctx.fillRect(Math.random()*size, size*0.25 + Math.random()*size*0.75, 1, 1); } textures = { grassTop: createCanvasTexture(drawGrassTop), grassSide: createCanvasTexture(drawGrassSide), dirt: createCanvasTexture(drawDirt), stone: createCanvasTexture(drawStone) }; blockMaterials = { grass: [ new THREE.MeshLambertMaterial({ map: textures.grassSide }), new THREE.MeshLambertMaterial({ map: textures.grassSide }), new THREE.MeshLambertMaterial({ map: textures.grassTop }), new THREE.MeshLambertMaterial({ map: textures.dirt }), new THREE.MeshLambertMaterial({ map: textures.grassSide }), new THREE.MeshLambertMaterial({ map: textures.grassSide }) ], dirt: new THREE.MeshLambertMaterial({ map: textures.dirt }), stone: new THREE.MeshLambertMaterial({ map: textures.stone }), }; blockMaterials.fallback = new THREE.MeshLambertMaterial({ color: 0xff00ff }); }
+        
+        function selectBlock(index) {
+            if (index >= 0 && index < availableBlocks.length) {
+                currentBlockIndex = index;
+                document.querySelectorAll('.slot').forEach((el, i) => {
+                    if (i === index) el.classList.add('active');
+                    else el.classList.remove('active');
+                });
+            }
+        }
+
+        function setupHotbar() {
+            for (let i = 0; i < 4; i++) {
+                const slot = document.getElementById(`slot-${i}`);
+                if (slot) {
+                    slot.addEventListener('click', (e) => {
+                        selectBlock(i);
+                        e.stopPropagation(); // prevent blocker from immediately eating the click
+                    });
+                }
+            }
+        }
+
+        function setupTexturesAndMaterials() {  
+            blockGeometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE); 
+            const textureSize = 16; 
+            
+            function createCanvasTexture(drawFunction) { 
+                const canvas = document.createElement('canvas'); 
+                canvas.width = textureSize; 
+                canvas.height = textureSize; 
+                const context = canvas.getContext('2d'); 
+                drawFunction(context, textureSize); 
+                const texture = new THREE.CanvasTexture(canvas); 
+                texture.magFilter = THREE.NearestFilter; 
+                texture.minFilter = THREE.NearestFilter; 
+                texture.needsUpdate = true; 
+                return texture; 
+            } 
+            
+            function drawDirt(ctx, size) { 
+                ctx.fillStyle = '#8B4513'; ctx.fillRect(0, 0, size, size); 
+                ctx.fillStyle = 'rgba(0,0,0,0.1)'; 
+                for (let i=0; i < size*size*0.3; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+            } 
+            
+            function drawStone(ctx, size) { 
+                ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, size, size); 
+                ctx.fillStyle = 'rgba(0,0,0,0.15)'; 
+                for (let i=0; i < size*size*0.4; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+                ctx.fillStyle = 'rgba(255,255,255,0.1)'; 
+                for (let i=0; i < size*size*0.2; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+            } 
+            
+            function drawWood(ctx, size) { 
+                ctx.fillStyle = '#654321'; ctx.fillRect(0, 0, size, size); 
+                ctx.fillStyle = '#5C3A21'; 
+                for (let i = 0; i < size; i += 4) ctx.fillRect(i, 0, 2, size); 
+                ctx.fillStyle = 'rgba(0,0,0,0.15)'; 
+                for (let i=0; i < size*size*0.3; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+            }
+
+            function drawCobblestone(ctx, size) { 
+                ctx.fillStyle = '#777777'; ctx.fillRect(0, 0, size, size); 
+                ctx.fillStyle = '#444444'; 
+                ctx.fillRect(0, 0, size, 2); ctx.fillRect(0, size/2, size, 2); 
+                ctx.fillRect(size/2, 0, 2, size/2); ctx.fillRect(size/4, size/2, 2, size/2); 
+                ctx.fillStyle = 'rgba(0,0,0,0.2)'; 
+                for (let i=0; i < size*size*0.4; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+            }
+            
+            function drawGrassTop(ctx, size) { 
+                ctx.fillStyle = '#5a9a5a'; ctx.fillRect(0, 0, size, size); 
+                ctx.fillStyle = 'rgba(0,0,0,0.1)'; 
+                for (let i=0; i < size*size*0.3; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+                ctx.fillStyle = 'rgba(255,255,255,0.05)'; 
+                for (let i=0; i < size*size*0.2; ++i) ctx.fillRect(Math.random()*size, Math.random()*size, 1, 1); 
+            } 
+            
+            function drawGrassSide(ctx, size) { 
+                ctx.fillStyle = '#5a9a5a'; ctx.fillRect(0, 0, size, size * 0.25); 
+                ctx.fillStyle = '#8B4513'; ctx.fillRect(0, size * 0.25, size, size * 0.75); 
+                ctx.fillStyle = 'rgba(0,0,0,0.1)'; 
+                for (let i=0; i < size*size*0.75*0.3; ++i) ctx.fillRect(Math.random()*size, size*0.25 + Math.random()*size*0.75, 1, 1); 
+            } 
+            
+            textures = { 
+                grassTop: createCanvasTexture(drawGrassTop), 
+                grassSide: createCanvasTexture(drawGrassSide), 
+                dirt: createCanvasTexture(drawDirt), 
+                stone: createCanvasTexture(drawStone),
+                wood: createCanvasTexture(drawWood),
+                cobblestone: createCanvasTexture(drawCobblestone)
+            }; 
+            
+            blockMaterials = { 
+                grass: [ 
+                    new THREE.MeshLambertMaterial({ map: textures.grassSide }), 
+                    new THREE.MeshLambertMaterial({ map: textures.grassSide }), 
+                    new THREE.MeshLambertMaterial({ map: textures.grassTop }), 
+                    new THREE.MeshLambertMaterial({ map: textures.dirt }), 
+                    new THREE.MeshLambertMaterial({ map: textures.grassSide }), 
+                    new THREE.MeshLambertMaterial({ map: textures.grassSide }) 
+                ], 
+                dirt: new THREE.MeshLambertMaterial({ map: textures.dirt }), 
+                stone: new THREE.MeshLambertMaterial({ map: textures.stone }), 
+                wood: new THREE.MeshLambertMaterial({ map: textures.wood }),
+                cobblestone: new THREE.MeshLambertMaterial({ map: textures.cobblestone })
+            }; 
+            
+            blockMaterials.fallback = new THREE.MeshLambertMaterial({ color: 0xff00ff }); 
+            
+            // Set hotbar textures to mirror blocks perfectly
+            document.getElementById('slot-0').style.backgroundImage = `url(${textures.grassSide.image.toDataURL()})`;
+            document.getElementById('slot-1').style.backgroundImage = `url(${textures.stone.image.toDataURL()})`;
+            document.getElementById('slot-2').style.backgroundImage = `url(${textures.wood.image.toDataURL()})`;
+            document.getElementById('slot-3').style.backgroundImage = `url(${textures.cobblestone.image.toDataURL()})`;
+        }
+        
         function setupWorld() {  for (let x = -WORLD_SIZE_X / 2; x < WORLD_SIZE_X / 2; x++) { for (let z = -WORLD_SIZE_Z / 2; z < WORLD_SIZE_Z / 2; z++) { for (let y = 0; y < WORLD_HEIGHT; y++) { let blockType; if (y === WORLD_HEIGHT - 1) blockType = 'grass'; else if (y >= WORLD_HEIGHT - 4 && y < WORLD_HEIGHT -1) blockType = 'dirt'; else blockType = 'stone'; addBlock(x, y, z, blockType, false); } } } }
         function addBlock(x, y, z, type, broadcast = true) {  const key = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`; if (world[key]) return; let material = blockMaterials[type] || blockMaterials.fallback; const block = new THREE.Mesh(blockGeometry, material); block.position.set(x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2, z + BLOCK_SIZE / 2); block.castShadow = true; block.receiveShadow = true; block.userData = { type: type }; scene.add(block); world[key] = { mesh: block, type: type }; if (broadcast) { broadcastMessage({ type: 'addBlock', id: peerId, position: { x, y, z }, blockType: type }); } }
         function removeBlock(x, y, z, broadcast = true) {  const key = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`; if (world[key]) { scene.remove(world[key].mesh); delete world[key]; if (broadcast) { broadcastMessage({ type: 'removeBlock', id: peerId, position: { x, y, z } }); } return true; } return false; }
@@ -125,9 +260,47 @@
         function setupControls() { blocker.addEventListener('click', () => { if (document.body.requestPointerLock) { document.body.requestPointerLock().catch(err => {}); } }); document.addEventListener('pointerlockchange', lockChangeAlert, false); function lockChangeAlert() { pointerLocked = (document.pointerLockElement === document.body); if (pointerLocked) { blocker.style.display = 'none'; document.addEventListener("mousemove", onMouseMove, false); } else { blocker.style.display = 'flex'; document.removeEventListener("mousemove", onMouseMove, false); moveForward = moveBackward = moveLeft = moveRight = isJumpHeld = false; } } const onMouseMove = (event) => { if (!pointerLocked) return; const movementX = event.movementX || 0; const movementY = event.movementY || 0; camera.rotation.y -= movementX * MOUSE_SENSITIVITY; camera.rotation.x -= movementY * MOUSE_SENSITIVITY; camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x)); }; }
         function setupEventListeners() {  window.addEventListener('resize', onWindowResize, false); document.addEventListener('keydown', onKeyDown, false); document.addEventListener('keyup', onKeyUp, false); document.addEventListener('mousedown', onMouseDown, false); document.addEventListener('contextmenu', (e) => { if(pointerLocked) e.preventDefault(); }, false); }
         function onWindowResize() {  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
-        function onKeyDown(event) {  if (!pointerLocked) return; switch (event.code) { case 'KeyW': case 'ArrowUp': moveForward = true; break; case 'KeyS': case 'ArrowDown': moveBackward = true; break; case 'KeyA': case 'ArrowLeft': moveLeft = true; break; case 'KeyD': case 'ArrowRight': moveRight = true; break; case 'Space': isJumpHeld = true; break; case 'Escape': if(document.pointerLockElement) document.exitPointerLock(); break; } }
+        function onKeyDown(event) {  
+            if (!pointerLocked) return; 
+            switch (event.code) { 
+                case 'KeyW': case 'ArrowUp': moveForward = true; break; 
+                case 'KeyS': case 'ArrowDown': moveBackward = true; break; 
+                case 'KeyA': case 'ArrowLeft': moveLeft = true; break; 
+                case 'KeyD': case 'ArrowRight': moveRight = true; break; 
+                case 'Space': isJumpHeld = true; break; 
+                case 'Escape': if(document.pointerLockElement) document.exitPointerLock(); break; 
+                case 'Digit1': selectBlock(0); break;
+                case 'Digit2': selectBlock(1); break;
+                case 'Digit3': selectBlock(2); break;
+                case 'Digit4': selectBlock(3); break;
+            } 
+        }
         function onKeyUp(event) {  switch (event.code) { case 'KeyW': case 'ArrowUp': moveForward = false; break; case 'KeyS': case 'ArrowDown': moveBackward = false; break; case 'KeyA': case 'ArrowLeft': moveLeft = false; break; case 'KeyD': case 'ArrowRight': moveRight = false; break; case 'Space': isJumpHeld = false; break; } }
-        function onMouseDown(event) {  if (!pointerLocked) return; const intersect = getIntersectingBlock(); if (!intersect) return; const blockMesh = intersect.object; const blockCenter = blockMesh.position; const normal = intersect.face.normal; if (event.button === 0) { const coords = { x: Math.round(blockCenter.x - BLOCK_SIZE/2), y: Math.round(blockCenter.y - BLOCK_SIZE/2), z: Math.round(blockCenter.z - BLOCK_SIZE/2) }; removeBlock(coords.x, coords.y, coords.z, true); } else if (event.button === 2) { const placePos = new THREE.Vector3(); intersect.point.addScaledVector(normal, -0.01); placePos.copy(intersect.point).addScaledVector(normal, BLOCK_SIZE * 0.51); const coords = { x: Math.floor(placePos.x), y: Math.floor(placePos.y), z: Math.floor(placePos.z) }; const playerFeetY = camera.position.y - PLAYER_HEIGHT; const playerHeadY = camera.position.y; const playerCenterY = (playerFeetY + playerHeadY) / 2; const playerBounds = new THREE.Box3().setFromCenterAndSize( new THREE.Vector3(camera.position.x, playerCenterY, camera.position.z), new THREE.Vector3(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH) ); const blockBB = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(coords.x + 0.5, coords.y + 0.5, coords.z + 0.5), new THREE.Vector3(1,1,1)); if (!playerBounds.intersectsBox(blockBB) && !getBlockAt(coords.x, coords.y, coords.z)) { addBlock(coords.x, coords.y, coords.z, 'stone', true); } } }
+        function onMouseDown(event) {  
+            if (!pointerLocked) return; 
+            const intersect = getIntersectingBlock(); 
+            if (!intersect) return; 
+            const blockMesh = intersect.object; 
+            const blockCenter = blockMesh.position; 
+            const normal = intersect.face.normal; 
+            if (event.button === 0) { 
+                const coords = { x: Math.round(blockCenter.x - BLOCK_SIZE/2), y: Math.round(blockCenter.y - BLOCK_SIZE/2), z: Math.round(blockCenter.z - BLOCK_SIZE/2) }; 
+                removeBlock(coords.x, coords.y, coords.z, true); 
+            } else if (event.button === 2) { 
+                const placePos = new THREE.Vector3(); 
+                intersect.point.addScaledVector(normal, -0.01); 
+                placePos.copy(intersect.point).addScaledVector(normal, BLOCK_SIZE * 0.51); 
+                const coords = { x: Math.floor(placePos.x), y: Math.floor(placePos.y), z: Math.floor(placePos.z) }; 
+                const playerFeetY = camera.position.y - PLAYER_HEIGHT; 
+                const playerHeadY = camera.position.y; 
+                const playerCenterY = (playerFeetY + playerHeadY) / 2; 
+                const playerBounds = new THREE.Box3().setFromCenterAndSize( new THREE.Vector3(camera.position.x, playerCenterY, camera.position.z), new THREE.Vector3(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH) ); 
+                const blockBB = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(coords.x + 0.5, coords.y + 0.5, coords.z + 0.5), new THREE.Vector3(1,1,1)); 
+                if (!playerBounds.intersectsBox(blockBB) && !getBlockAt(coords.x, coords.y, coords.z)) { 
+                    addBlock(coords.x, coords.y, coords.z, availableBlocks[currentBlockIndex], true); 
+                } 
+            } 
+        }
         function getIntersectingBlock() {  raycaster.setFromCamera({ x: 0, y: 0 }, camera); const worldMeshes = Object.values(world).map(b => b.mesh).filter(mesh => mesh); if (worldMeshes.length === 0) return null; const intersects = raycaster.intersectObjects(worldMeshes); for(let i = 0; i < intersects.length; i++) { if (intersects[i].distance <= REACH_DISTANCE) return intersects[i]; } return null; }
 
         function generateShortId(length = 6) { const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let result = ''; for (let i = 0; i < length; i++) { result += chars.charAt(Math.floor(Math.random() * chars.length)); } return result; }
